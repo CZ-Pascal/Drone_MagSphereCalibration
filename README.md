@@ -143,6 +143,32 @@ The comparison report includes:
 
 This can be useful for checking whether two recordings produce consistent calibration results.
 
+## Calibration example
+
+The following screenshots show a complete calibration workflow using Betaflight BlackBox data. The example compares measurements before and after applying a soft-iron correction in the flight-controller firmware.
+
+### Before correction
+
+![Before correction](Images/Before_Correction.png)
+
+This view shows magnetometer data recorded from BlackBox while the firmware had no soft-iron correction enabled. The measured points form a distorted ellipsoid rather than a sphere. This distortion represents scale differences and axis coupling introduced by the sensor installation and surrounding hardware.
+
+### Calculated correction
+
+![Calculated correction](Images/Calculated_Correction.png)
+
+Using the uncorrected BlackBox data, the application fits a rotated 3D ellipsoid and calculates the corresponding calibration parameters. The displayed result includes the estimated hard-iron center, principal-axis radii, ellipsoid axes, calibration deviation, and the 3x3 soft-iron correction matrix generated for Betaflight integration.
+
+The matrix is calculated from the measured ellipsoid so that, after subtracting the fitted center and applying the matrix, the distorted point cloud is transformed toward a sphere.
+
+### After correction
+
+![After correction](Images/After_Correction.png)
+
+This view shows a new BlackBox dataset recorded after the calculated soft-iron correction matrix was applied in the Betaflight firmware. The measurement distribution is substantially closer to a sphere, demonstrating the effect of applying the correction during sensor processing.
+
+The soft-iron correction feature is currently an extension to the original Betaflight firmware. Standard upstream Betaflight does not yet include this functionality. The author intends to submit the implementation as a pull request so that future Betaflight versions can support this correction natively.
+
 ## Betaflight CLI output
 
 The application displays generated output in the **Betaflight CLI commands** panel. It includes:
