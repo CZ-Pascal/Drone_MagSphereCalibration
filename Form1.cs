@@ -39,6 +39,8 @@ namespace BetaflightMagVisualizer
         private Vector3 lastRadii = Vector3.One;
         private Matrix3 softIronMatrix = Matrix3.Identity; // general ellipsoid compensation, including arbitrary rotation relative to the base axes
 
+        private Matrix3 CholeskyMatrix = Matrix3.Identity; // Cholesky decomposition of the soft-iron matrix for comparison with Betaflight's method
+
         // Secondary measurement used for comparison
         private List<Vector3> allCsvPoints2 = new List<Vector3>();
         private List<Vector3> rawPoints2 = new List<Vector3>();
@@ -64,7 +66,7 @@ namespace BetaflightMagVisualizer
         /// </summary>
         private void InitializeCustomUI()
         {
-            this.Text = "Betaflight Magnetometer 3D Calibrator (OpenTK)";
+            this.Text = "Betaflight Magnetometer 3D Calibrator (OpenTK) - V1.1";
             this.Size = new Size(1100, 750);
             this.StartPosition = FormStartPosition.CenterScreen;
 
@@ -109,7 +111,11 @@ namespace BetaflightMagVisualizer
                 Padding = new Padding(5, 2, 0, 0)
             };
 
-            chkShowCsv2.CheckedChanged += (s, e) => glControl.Invalidate();
+            chkShowCsv2.CheckedChanged += (s, e) =>
+            {
+                UpdateStatsDisplay();
+                glControl.Invalidate();
+            };
 
             sidePanel.Controls.Add(chkShowCsv2);
             chkShowCsv2.BringToFront();
@@ -452,7 +458,8 @@ namespace BetaflightMagVisualizer
             lblStats.Text = $"Unique points: {rawPoints.Count}\n" +
                             $"Principal-axis radii: {lastRadii.X:F0} / {lastRadii.Y:F0} / {lastRadii.Z:F0}\n" +
                             $"Deviation ({modeLabel}): {errorPercent:F2} %" +
-                            CompareEllipsoids();
+                            CompareEllipsoids() +
+                            CompareJacobiCholesky();
         }
         /// <summary>
         /// Generates Betaflight CLI calibration commands and displays them in the CLI output field.
@@ -525,6 +532,8 @@ namespace BetaflightMagVisualizer
             sphereRadius = (fit.Radii.X + fit.Radii.Y + fit.Radii.Z) / 3.0f;
             ellipsoidAxes = fit.PrincipalAxes;
             lastRadii = fit.Radii;
+
+            CholeskyMatrix = fit.CholeskyMatrix; // store the Cholesky decomposition for comparison with Betaflight's method
 
             // -----------------------------------
             // Data from the second measured set for comparison
@@ -1082,6 +1091,8 @@ namespace BetaflightMagVisualizer
 
             lastRadii = fit.Radii;
 
+            CholeskyMatrix = fit.CholeskyMatrix; // store the Cholesky decomposition for comparison with Betaflight's method
+
             // Calculate the error after fitting the rotated ellipsoid to a sphere
             double sumSqDiff = 0;
             foreach (var p in rawPoints)
@@ -1108,6 +1119,11 @@ namespace BetaflightMagVisualizer
         {
             if (rawPoints == null || rawPoints.Count < 20 || rawPoints2 == null || rawPoints2.Count < 20)
                 return string.Empty;
+
+            if(chkShowCsv2.Enabled && !chkShowCsv2.Checked)
+            {
+                return string.Empty; // skip comparison if the second dataset is not enabled
+            }
 
             try
             {
@@ -1153,6 +1169,34 @@ namespace BetaflightMagVisualizer
                 return "\n--- COMPARISON OF SETS 1 AND 2 ---\nUnable to fit an ellipsoid to set 2.";
             }
         }
+
+        /// <summary>
+        /// Compares the Jacobi and Cholesky soft-iron matrices.
+        /// </summary>
+        /// <returns>A formatted comparison of the maximum angle and yaw differences, or an empty string when insufficient raw
+        /// points are available.</returns>
+        private string CompareJacobiCholesky()
+        {
+            if (rawPoints == null || rawPoints.Count < 20)
+                return string.Empty;
+
+            if (chkShowCsv2.Enabled && chkShowCsv2.Checked)
+            {   // skip comparison if a second dataset is present, as it is not relevant and there is no enough space in the CLI output for both comparisons
+                return string.Empty; 
+            }
+
+            var AngleDiff = CompareSoftIronMatrices(rawPoints, sphereCenter, softIronMatrix, CholeskyMatrix);
+
+            var JacobiRotation = ExtractMatrixRotation(softIronMatrix);
+            var CholeskyRotation = ExtractMatrixRotation(CholeskyMatrix);
+
+            return $"\n--- COMPARISON OF SOFT-IRON MATRICES ---" +
+                   $"\nJacobi vs Cholesky:\n  {AngleDiff:F2}° Maximum Angle Difference" +
+                   $"\nJacobi: {JacobiRotation.TotalAngleDeg:F2}° ({JacobiRotation.RollDeg:F2}°, {JacobiRotation.PitchDeg:F2}°, {JacobiRotation.YawDeg:F2}°)" +
+                   $"\nCholesky: {CholeskyRotation.TotalAngleDeg:F2}° ({CholeskyRotation.RollDeg:F2}°, {CholeskyRotation.PitchDeg:F2}°, {CholeskyRotation.YawDeg:F2}°)";
+
+        }
+
         /// <summary>
         /// Gets the axis with the greatest length.
         /// </summary>
@@ -1242,7 +1286,7 @@ namespace BetaflightMagVisualizer
         /// <param name="points">The three-dimensional points used to fit the ellipsoid.</param>
         /// <returns>A tuple containing the ellipsoid center, radii, soft-iron correction matrix, and three principal axes.</returns>
         /// <exception cref="Exception">The fitted shape is not a closed ellipsoid because one or more eigenvalues are not positive.</exception>
-        private (Vector3 Center, Vector3 Radii, Matrix3 SoftIronMatrix, Vector3[] PrincipalAxes) FitEllipsoid(List<Vector3> points)
+        private (Vector3 Center, Vector3 Radii, Matrix3 SoftIronMatrix, Matrix3 CholeskyMatrix, Vector3[] PrincipalAxes) FitEllipsoid(List<Vector3> points)
         {
             // 1. Build the 9x9 normal equations:
             // a0*x^2 + a1*y^2 + a2*z^2 + a3*xy + a4*xz + a5*yz + a6*x + a7*y + a8*z = 1
@@ -1318,7 +1362,8 @@ namespace BetaflightMagVisualizer
                 (float)W[2, 0], (float)W[2, 1], (float)W[2, 2]
             );
 
-            //return (center, new Vector3((float)r0, (float)r1, (float)r2), softIron);
+            // 4b. Compute the Cholesky decomposition of the soft-iron matrix for calibration purposes and to compare with Betaflight's method
+            Matrix3 choleskyMatrix = ComputeCholeskySoftIron(M, avgRadius);
 
             // 5. Build the ellipsoid's principal semi-axes (unit eigenvector * corresponding radius)
             Vector3[] principalAxes = new Vector3[3];
@@ -1326,7 +1371,7 @@ namespace BetaflightMagVisualizer
             principalAxes[1] = new Vector3((float)V[0, 1], (float)V[1, 1], (float)V[2, 1]) * (float)r1;
             principalAxes[2] = new Vector3((float)V[0, 2], (float)V[1, 2], (float)V[2, 2]) * (float)r2;
 
-            return (center, new Vector3((float)r0, (float)r1, (float)r2), softIron, principalAxes);
+            return (center, new Vector3((float)r0, (float)r1, (float)r2), softIron, choleskyMatrix, principalAxes);
         }
 
         /// <summary>
@@ -1454,6 +1499,195 @@ namespace BetaflightMagVisualizer
                 m.Row2.X * v.X + m.Row2.Y * v.Y + m.Row2.Z * v.Z
             );
         }
+
+        // ====================================================================================
+        // Calculations done in current implementation of BetaFlight Configurator
+        // ====================================================================================
+        
+        /// <summary>
+        /// Computes the lower-triangular Cholesky factor of a 3-by-3 positive-definite matrix.
+        /// </summary>
+        /// <remarks>The factor satisfies <c>Q = L * L<superscript>T</superscript></c>, where <c>L</c> is
+        /// lower triangular.</remarks>
+        /// <param name="Q">The symmetric 3-by-3 matrix to factor.</param>
+        /// <returns>The lower-triangular factor; otherwise, <c>null</c> when the matrix is not positive-definite or cannot be
+        /// factored.</returns>
+        private double[,] Cholesky3x3(double[,] Q)
+        {
+            double[,] L = new double[3, 3];
+
+            L[0, 0] = Math.Sqrt(Q[0, 0]);
+            if (double.IsNaN(L[0, 0]) || L[0, 0] <= 0) return null;
+
+            L[1, 0] = Q[1, 0] / L[0, 0];
+            L[2, 0] = Q[2, 0] / L[0, 0];
+
+            L[1, 1] = Math.Sqrt(Q[1, 1] - L[1, 0] * L[1, 0]);
+            if (double.IsNaN(L[1, 1]) || L[1, 1] <= 0) return null;
+
+            L[2, 1] = (Q[2, 1] - L[2, 0] * L[1, 0]) / L[1, 1];
+
+            L[2, 2] = Math.Sqrt(Q[2, 2] - L[2, 0] * L[2, 0] - L[2, 1] * L[2, 1]);
+            if (double.IsNaN(L[2, 2]) || L[2, 2] <= 0) return null;
+
+            return L;
+        }
+
+        /// <summary>
+        /// Computes a Cholesky-based soft-iron correction matrix.
+        /// </summary>
+        /// <remarks>The lower-triangular Cholesky factor converts the covariance ellipsoid into a unit
+        /// sphere and is scaled to match the corresponding calibration matrix.</remarks>
+        /// <param name="M">The covariance matrix used to derive the correction.</param>
+        /// <param name="avgRadius">The average radius used to scale the correction matrix.</param>
+        /// <returns>The correction matrix scaled by the average radius, or the identity matrix when the covariance matrix cannot
+        /// be decomposed.</returns>
+        private Matrix3 ComputeCholeskySoftIron(double[,] M, double avgRadius)
+        {
+            double[,] L = Cholesky3x3(M);
+            if (L == null) return Matrix3.Identity;
+
+            // W_inv = L^T transforms the ellipsoid into a unit sphere (radius 1.0).
+            // Multiplying by avgRadius scales it back to the same scale as Jacobi matrix W.
+            return new Matrix3(
+                (float)(L[0, 0] * avgRadius), (float)(L[1, 0] * avgRadius), (float)(L[2, 0] * avgRadius),
+                0f, (float)(L[1, 1] * avgRadius), (float)(L[2, 1] * avgRadius),
+                0f, 0f, (float)(L[2, 2] * avgRadius)
+            );
+        }
+        
+
+        // ----------------------------------------------------------------------------------------------
+        /// <summary>
+        /// Compares soft-iron correction matrices by maximum 3D angular difference.
+        /// </summary>
+        /// <param name="points">The points to transform and compare.</param>
+        /// <param name="center">The center subtracted from each point.</param>
+        /// <param name="jacobiMatrix">The Jacobi transformation matrix.</param>
+        /// <param name="choleskyMatrix">The Cholesky transformation matrix.</param>
+        /// <returns>The maximum 3D angle difference in degrees.</returns>
+        private double CompareSoftIronMatrices( List<Vector3> points, Vector3 center, Matrix3 jacobiMatrix, Matrix3 choleskyMatrix)
+        {
+            double maxAngleDeg = 0.0;
+
+            foreach (var p in points)
+            {
+                Vector3 centered = p - center;
+
+                Vector3 vJacobi = TransformVec3(jacobiMatrix, centered);
+                Vector3 vCholesky = TransformVec3(choleskyMatrix, centered);
+
+                // 1. Celkový úhlový rozdíl 3D vektorů ve stupních
+                float lenJ = vJacobi.Length;
+                float lenC = vCholesky.Length;
+                if (lenJ > 1e-6f && lenC > 1e-6f)
+                {
+                    float dot = Vector3.Dot(vJacobi, vCholesky) / (lenJ * lenC);
+                    double angleDeg = Math.Acos(Math.Clamp(dot, -1.0f, 1.0f)) * (180.0 / Math.PI);
+                    if (angleDeg > maxAngleDeg)
+                    {
+                        maxAngleDeg = angleDeg;
+                    }
+                }
+            }
+
+            return (maxAngleDeg);
+        }
+
+        // ----------------------------------------------------------------------------------------------
+        /// <summary>
+        /// Extracts the pure rotational component from an arbitrary 3x3 matrix using Polar Decomposition
+        /// and returns the total rotation angle along with Roll, Pitch, and Yaw angles in degrees.
+        /// </summary>
+        private (double TotalAngleDeg, double RollDeg, double PitchDeg, double YawDeg) ExtractMatrixRotation(Matrix3 m)
+        {
+            double[,] R = {
+                { m.Row0.X, m.Row0.Y, m.Row0.Z },
+                { m.Row1.X, m.Row1.Y, m.Row1.Z },
+                { m.Row2.X, m.Row2.Y, m.Row2.Z }
+            };
+
+            // Higham's iteration for Polar Decomposition: R_{k+1} = 0.5 * (R_k + (R_k^-1)^T)
+            // Converges quadratically to the nearest orthogonal rotation matrix (usually in 6-8 steps).
+            for (int iter = 0; iter < 10; iter++)
+            {
+                double[,] invT = InvertAndTranspose3x3(R);
+                if (invT == null)
+                {
+                    return (0.0, 0.0, 0.0, 0.0);
+                }
+
+                for (int i = 0; i < 3; i++)
+                {
+                    for (int j = 0; j < 3; j++)
+                    {
+                        R[i, j] = 0.5 * (R[i, j] + invT[i, j]);
+                    }
+                }
+            }
+
+            // 1. Total spatial rotation angle from the trace of R
+            double trace = R[0, 0] + R[1, 1] + R[2, 2];
+            double cosTheta = Math.Clamp((trace - 1.0) * 0.5, -1.0, 1.0);
+            double totalAngleDeg = Math.Acos(cosTheta) * (180.0 / Math.PI);
+
+            // 2. Euler angles (ZYX aerospace convention: Yaw -> Pitch -> Roll)
+            double sy = -R[2, 0];
+            double pitchRad = Math.Asin(Math.Clamp(sy, -1.0, 1.0));
+            double rollRad, yawRad;
+
+            if (Math.Cos(pitchRad) > 1e-6)
+            {
+                rollRad = Math.Atan2(R[2, 1], R[2, 2]);
+                yawRad = Math.Atan2(R[1, 0], R[0, 0]);
+            }
+            else
+            {
+                // Gimbal lock fallback
+                rollRad = Math.Atan2(-R[1, 2], R[1, 1]);
+                yawRad = 0.0;
+            }
+
+            const double radToDeg = 180.0 / Math.PI;
+            return (totalAngleDeg, rollRad * radToDeg, pitchRad * radToDeg, yawRad * radToDeg);
+        }
+
+        /// <summary>
+        /// Calculates the transpose of a 3 x 3 matrix inverse.
+        /// </summary>
+        /// <param name="a">The 3 x 3 matrix to invert.</param>
+        /// <returns>The transposed inverse matrix, or null if the matrix is singular.</returns>
+        private double[,] InvertAndTranspose3x3(double[,] a)
+        {
+            double c00 =   a[1, 1] * a[2, 2] - a[1, 2] * a[2, 1];
+            double c01 = -(a[1, 0] * a[2, 2] - a[1, 2] * a[2, 0]);
+            double c02 =   a[1, 0] * a[2, 1] - a[1, 1] * a[2, 0];
+
+            double c10 = -(a[0, 1] * a[2, 2] - a[0, 2] * a[2, 1]);
+            double c11 =   a[0, 0] * a[2, 2] - a[0, 2] * a[2, 0];
+            double c12 = -(a[0, 0] * a[2, 1] - a[0, 1] * a[2, 0]);
+
+            double c20 =   a[0, 1] * a[1, 2] - a[0, 2] * a[1, 1];
+            double c21 = -(a[0, 0] * a[1, 2] - a[0, 2] * a[1, 0]);
+            double c22 =   a[0, 0] * a[1, 1] - a[0, 1] * a[1, 0];
+
+            double det = a[0, 0] * c00 + a[0, 1] * c01 + a[0, 2] * c02;
+            if (Math.Abs(det) < 1e-12)
+            {
+                return null;
+            }
+
+            double invDet = 1.0 / det;
+
+            // Cofactor matrix divided by determinant is already (A^-1)^T
+            return new double[,] {
+                { c00 * invDet, c01 * invDet, c02 * invDet },
+                { c10 * invDet, c11 * invDet, c12 * invDet },
+                { c20 * invDet, c21 * invDet, c22 * invDet }
+            };
+        }
+
+
 
     }
 }

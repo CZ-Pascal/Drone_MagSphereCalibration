@@ -19,6 +19,7 @@ The application loads BlackBox CSV logs, extracts magnetometer samples, fits an 
   - the principal ellipsoid radii;
   - a 3x3 soft-iron correction matrix;
   - the principal axes of the measured ellipsoid.
+- Compare the application's Jacobi-based correction with the current Betaflight Configurator approach.
 - Compare two BlackBox measurements in the same visualization.
 - Display raw, center-only, or fully corrected data.
 - Inspect calibration quality using the calculated deviation percentage.
@@ -45,6 +46,24 @@ The full correction therefore consists of:
 
 The **Center only (Hard-Iron / standard BF)** option applies only the center offset and leaves the ellipsoid shape visible. The **Apply ellipsoid correction (Soft-Iron)** option applies both corrections.
 
+## Comparison with Betaflight Configurator
+
+The project also contains an independent implementation intended for comparison with the current magnetometer calibration implementation in **Betaflight Configurator**.
+
+The application calculates the primary soft-iron matrix using the eigenvalues and eigenvectors of the fitted ellipsoid's symmetric quadratic matrix. This is referred to in the application as the **Jacobi** method. A second matrix is calculated using a **Cholesky decomposition** of the same normalized ellipsoid matrix, following the lower-triangular correction approach used for comparison with the current Betaflight Configurator implementation.
+
+The comparison code:
+
+- calculates both correction matrices from the same fitted measurement data;
+- compares the transformed vectors point by point;
+- reports the maximum angular difference between the two corrected vectors;
+- extracts and reports the total rotational component of each matrix;
+- reports the Roll, Pitch, and Yaw components of both matrix rotations.
+
+When a second BlackBox dataset is loaded and enabled, the application prioritizes the dataset comparison report instead, because both reports cannot be displayed clearly in the available CLI output area. Disable the second dataset to inspect the Jacobi-versus-Cholesky comparison.
+
+This comparison is intended as an engineering and validation aid. It helps determine whether the correction produced by this project is directionally consistent with the current Betaflight Configurator implementation. Small numerical or matrix-structure differences are possible because the two methods can represent the same ellipsoid transformation using different matrix forms. Always validate the resulting calibration on the actual flight controller.
+
 ## Requirements
 
 - Windows 10 or later.
@@ -63,7 +82,7 @@ net10.0-windows
 Clone the repository and build the project with the .NET CLI:
 
 ```powershell
-git clone <repository-url>
+git clone https://github.com/CZ-Pascal/Drone_MagSphereCalibration
 cd Drone_MagSphereCalibration
 dotnet restore
 dotnet build
